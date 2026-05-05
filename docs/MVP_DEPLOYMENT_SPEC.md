@@ -187,11 +187,14 @@ Recommended cadence for MVP:
 - In-memory rate limiter, not shared across replicas.
 - API key auth, not SSO.
 - Controller key can be file-backed.
-- No update/re-filing workflow.
+- Correction/amendment packets exist at the API layer, but there is no complete
+  update/re-filing UI or version-issuance workflow yet.
 - No key rotation workflow.
 - No deactivation workflow.
 - No production audit log.
 - Arweave public persistence is supported; local CID storage remains the fallback for MVP verification when Arweave is unavailable.
+
+See `docs/OPEN_ITEMS.md` for the current production-readiness gap list.
 
 ## Deployment Decision
 

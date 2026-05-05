@@ -223,6 +223,9 @@ scale-out (which is on the deferred list).
 
 This is a reference. Before production, harden these:
 
+The detailed, current production-readiness backlog is tracked in
+[`docs/OPEN_ITEMS.md`](docs/OPEN_ITEMS.md).
+
 - The controller private key lives at `data/keys/controller.json` for
   developer convenience. Production should set `CONTROLLER_PRIVATE_KEY`
   (a 64-char hex Ed25519 seed) from an HSM/KMS-backed secret rather than
