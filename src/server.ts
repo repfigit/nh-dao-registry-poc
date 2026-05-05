@@ -39,12 +39,17 @@ import { operationalBalances } from './balances.js';
 import {
   listRegistryIds, loadRecord, loadDao, loadAgent, loadMeta,
   saveMeta, appendAdminAudit, listAdminAudit,
+  loadCredential, listCredentialKinds,
 } from './store.js';
 import { loadOrCreateKeyPair } from './crypto.js';
 import { publicKeyJwk } from './crypto.js';
 import { anchorEnabled } from './anchor.js';
 import { readLocal } from './ipfs.js';
 import { registryDid } from './didweb.js';
+import {
+  buildStatusListCredential, signStatusListCredential,
+  revokeIndex, readStatusListState, isRevoked,
+} from './statuslist.js';
 import { serverConfig, filingApiKey, adminApiKey, filingRate, verifyRate, productionConfigIssues, hasPublicPinning } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -213,11 +218,16 @@ function publicRecord(record: any) {
       attestations: meta.compliance.attestations,
     } : null,
     anchors: meta.anchors || null,
+    credentials: meta.credentials || null,
     warnings: meta.warnings || [],
     links: {
       daoDidDocument: `/dao/${meta.registryId}/did.json`,
       agentDidDocument: `/agent/${meta.registryId}/did.json`,
       verify: `/api/verify/${meta.registryId}`,
+      credentials: `/api/credentials/${meta.registryId}`,
+      intakeCredential: meta.credentials?.intake ? `/credentials/${meta.registryId}/intake.json` : null,
+      registrationCredential: meta.credentials?.registration ? `/credentials/${meta.registryId}/registration.json` : null,
+      statusList: `/status/registry.json`,
     },
   };
 }
@@ -331,6 +341,173 @@ app.get('/agent/:id/did.json', (req, res) => {
   res.type('application/did+json').json(doc);
 });
 
+/* ---------- public Verifiable Credentials ---------- */
+
+function nowIsoNoMs() {
+  return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+app.get('/credentials/:id/:kind.json', (req, res) => {
+  const credential = loadCredential(req.params.id, req.params.kind);
+  if (!credential) return res.status(404).json({ error: 'credential not issued' });
+  res.type('application/vc+ld+json').json(credential);
+});
+
+app.get('/api/credentials/:id', (req, res) => {
+  const meta = loadMeta(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+  const kinds = listCredentialKinds(req.params.id);
+  const credentials: Record<string, any> = {};
+  for (const k of kinds) {
+    credentials[k] = loadCredential(req.params.id, k);
+  }
+  res.json({
+    registryId: req.params.id,
+    daoDid: meta.daoDid,
+    agentDid: meta.agentDid,
+    metadata: meta.credentials || null,
+    credentials,
+  });
+});
+
+/* ---------- Lifecycle: dissolution, update notice, forks ---------- */
+
+/**
+ * Mark a registered DAO as dissolved. Sets `meta.lifecycle.dissolution`,
+ * revokes the registration credential (if issued), and writes an audit
+ * event. Dissolution is recorded; the underlying DAO documents and
+ * intake credentials remain published as historical record. Production
+ * deployments should require an operator + reason and a quorum of
+ * lifecycle approvers; this MVP requires admin auth and a written
+ * reason.
+ *
+ * Open question (deferred to statute): can dissolution be filer-
+ * initiated, SoS-initiated, or both, and on what evidence? This stub
+ * supports SoS-initiated dissolution only.
+ */
+app.post('/api/admin/records/:id/dissolve', requireAdminAuth, (req, res) => {
+  const meta = loadMeta(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+  const reviewer = String((req.body || {}).reviewer || '').trim().slice(0, 120) || 'Secretary of State reviewer';
+  const reason = String((req.body || {}).reason || '').trim().slice(0, 2000);
+  if (!reason) return res.status(400).json({ error: 'reason is required for dissolution' });
+  const at = nowIsoNoMs();
+
+  meta.lifecycle = meta.lifecycle || { dissolution: null, updateNotices: [] };
+  meta.lifecycle.dissolution = { at, reviewer, reason };
+
+  let revocation: any = null;
+  const registrationCredential = loadCredential(req.params.id, 'registration');
+  if (registrationCredential) {
+    const idx = Number(registrationCredential.credentialStatus?.statusListIndex);
+    if (Number.isInteger(idx) && idx >= 0) {
+      revocation = revokeIndex(idx);
+    }
+  }
+
+  saveMeta(req.params.id, meta);
+  appendAdminAudit({
+    at, registryId: req.params.id, action: 'dissolve',
+    reviewer, reason, credentialRevocation: revocation,
+  });
+  res.json({ registryId: req.params.id, lifecycle: meta.lifecycle, credentialRevocation: revocation });
+});
+
+/**
+ * Append a filer-reported notice that the DAO's smart-contract code,
+ * governance, or operational state has changed. The notice is signed
+ * implicitly by the registry on inclusion (the meta is part of the
+ * record), but the *content* of the notice is the filer's claim and
+ * is recorded as such. This is a stub: a complete implementation would
+ * trigger a re-attestation flow and possibly a credential-validity
+ * extension; the MVP just records.
+ *
+ * Open question (deferred): should code updates auto-detect via
+ * on-chain bytecode polling, or rely on filer self-report? This stub
+ * supports self-report only.
+ */
+app.post('/api/records/:id/update-notice', filingLimiter, requireFilingAuth, (req, res) => {
+  const meta = loadMeta(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+  const summary = String((req.body || {}).summary || '').trim().slice(0, 2000);
+  const contractAddress = String((req.body || {}).contractAddress || '').trim().slice(0, 120);
+  const newCodeHash = String((req.body || {}).newCodeHash || '').trim().slice(0, 200);
+  if (!summary) return res.status(400).json({ error: 'summary is required' });
+  const at = nowIsoNoMs();
+  meta.lifecycle = meta.lifecycle || { dissolution: null, updateNotices: [] };
+  meta.lifecycle.updateNotices = [
+    ...meta.lifecycle.updateNotices,
+    { at, summary, contractAddress: contractAddress || null, newCodeHash: newCodeHash || null },
+  ];
+  saveMeta(req.params.id, meta);
+  res.json({ registryId: req.params.id, lifecycle: meta.lifecycle });
+});
+
+/**
+ * List filings whose `forkOf` field points at this registry id. Useful
+ * for showing fork provenance forward (the parent doesn't otherwise
+ * know about its forks).
+ */
+app.get('/api/records/:id/forks', (req, res) => {
+  const out = listRegistryIds()
+    .map(id => ({ id, meta: loadMeta(id) }))
+    .filter(({ meta }) => meta && meta.forkOf === req.params.id)
+    .map(({ id, meta }) => summarizeRecord(id, meta));
+  res.json({ parent: req.params.id, count: out.length, forks: out });
+});
+
+/* ---------- Bitstring Status List ---------- */
+
+app.get('/status/registry.json', (_, res) => {
+  const kp = loadOrCreateKeyPair(CONTROLLER_KEY_PATH);
+  const issuer = registryDid(HOST);
+  const url = `${SCHEME}://${HOST}/status/registry.json`;
+  const issuedAt = nowIsoNoMs();
+  const unsigned = buildStatusListCredential({
+    issuerDid: issuer,
+    statusListUrl: url,
+    issuedAt,
+    validFrom: issuedAt,
+  });
+  const signed = signStatusListCredential(unsigned, kp.privateKey, 'controller-1', issuedAt);
+  res.type('application/vc+ld+json').json(signed);
+});
+
+app.get('/api/status/state', (_, res) => {
+  const state = readStatusListState();
+  res.json({
+    nextIndex: state.nextIndex,
+    revokedCount: state.revoked.length,
+    totalBits: state.totalBits,
+    lastUpdated: state.lastUpdated,
+  });
+});
+
+app.post('/api/admin/credentials/:id/:kind/revoke', requireAdminAuth, (req, res) => {
+  const credential = loadCredential(req.params.id, req.params.kind);
+  if (!credential) return res.status(404).json({ error: 'credential not issued' });
+  const indexStr = credential.credentialStatus?.statusListIndex;
+  const index = Number(indexStr);
+  if (!Number.isInteger(index) || index < 0) {
+    return res.status(409).json({ error: 'credential has no valid statusListIndex' });
+  }
+  const reviewer = String((req.body || {}).reviewer || '').trim().slice(0, 120) || 'Secretary of State reviewer';
+  const reason = String((req.body || {}).reason || '').trim().slice(0, 2000);
+  if (!reason) return res.status(400).json({ error: 'reason is required for revocation' });
+  const result = revokeIndex(index);
+  appendAdminAudit({
+    at: nowIsoNoMs(),
+    registryId: req.params.id,
+    action: 'credential-revoke',
+    kind: req.params.kind,
+    index,
+    changed: result.changed,
+    reviewer,
+    reason,
+  });
+  res.json({ ...result, revoked: isRevoked(index) });
+});
+
 /* ---------- local IPFS gateway (fallback) ---------- */
 
 app.get('/ipfs/:cid', (req, res) => {
@@ -354,6 +531,59 @@ app.get('/api/records/:id', (req, res) => {
   const r = loadRecord(req.params.id);
   if (!r) return res.status(404).json({ error: 'not found' });
   res.json(publicRecord(r));
+});
+
+/**
+ * Public no-auth lookup by DAO name (case-insensitive substring) or by
+ * DID (exact match). Returns an array of matching summaries; clients can
+ * follow up with `/api/registry/:id/bundle` for the full payload. The
+ * USPTO-TESS-style discovery endpoint web3iam.eth asked for in the
+ * design discussion: any third party can resolve a DAO by name or DID
+ * without an account or API key.
+ */
+app.get('/api/registry/lookup', (req, res) => {
+  const name = typeof req.query.name === 'string' ? req.query.name.trim().toLowerCase() : '';
+  const did = typeof req.query.did === 'string' ? req.query.did.trim() : '';
+  if (!name && !did) return res.status(400).json({ error: 'must supply name= or did=' });
+
+  const out = listRegistryIds()
+    .map(id => ({ id, meta: loadMeta(id) }))
+    .filter(({ meta }) => {
+      if (!meta) return false;
+      if (did) return meta.daoDid === did || meta.agentDid === did;
+      const haystack = String(meta.daoName || '').toLowerCase();
+      return haystack.includes(name);
+    })
+    .map(({ id, meta }) => ({
+      ...summarizeRecord(id, meta),
+      anchored: !!(meta.anchors && meta.anchors.dao),
+    }));
+
+  res.json({ count: out.length, records: out });
+});
+
+/**
+ * Single-fetch bundle: everything a third party needs to verify a
+ * registered DAO without making N round-trips. Returns the public
+ * record projection plus the actual DAO and agent DID documents and
+ * any issued credentials. Tag the response so caches treat each
+ * version as immutable.
+ */
+app.get('/api/registry/:id/bundle', (req, res) => {
+  const r = loadRecord(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  const credentials: Record<string, any> = {};
+  for (const k of listCredentialKinds(req.params.id)) {
+    credentials[k] = loadCredential(req.params.id, k);
+  }
+  res.set('Cache-Control', 'public, max-age=60');
+  res.json({
+    public: publicRecord(r),
+    daoDocument: r.dao,
+    agentDocument: r.agent,
+    credentials,
+    statusListUrl: '/status/registry.json',
+  });
 });
 
 app.get('/api/admin/balances', requireAdminAuth, async (_, res) => {

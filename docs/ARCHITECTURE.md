@@ -119,6 +119,24 @@ exceptions. v0.6 hardcodes the initial version to 1; the contract
 already supports update workflows but `publication.ts` does not yet
 expose a re-filing path.
 
+`src/vc.ts`
+Verifiable Credential issuance. Builds two VC types (W3C VC Data Model 2.0):
+`IntakeAcknowledgement` (issued at filing; legalStatus=`not-determined`)
+and `RegisteredNHDAOCredential` (issued on SoS approval;
+legalStatus=`registered`). Self-expiring `validUntil` defaults to one
+year, tied to annual report cadence. Same Ed25519 controller key and
+same `JWS_DOMAIN` as the DID-document signatures, so a credential
+signature cannot be replayed against a DID-document verifier.
+
+`src/statuslist.ts`
+Bitstring Status List 2021 implementation. Each issued credential gets
+a unique index; the published list is a gzipped + base64url bitstring
+where bit `i` = 1 iff credential `i` has been revoked. The list itself
+is a signed `StatusList2021Credential` so verifiers can prove the
+list's authenticity without contacting the SoS over a private channel.
+The POC list size is 16,384 bits; production deployments should bump
+to the W3C minimum of 131,072 to defeat fingerprinting.
+
 `src/server.ts`
 Express server. Routes:
 
@@ -127,9 +145,20 @@ Express server. Routes:
 - `GET /readyz` readiness probe
 - `GET /inspect` records list and inspector
 - `GET /api/records` list of filings
-- `GET /api/records/:id` full record
+- `GET /api/records/:id` full record (public projection)
+- `GET /api/records/:id/forks` fork children of a registered DAO
+- `GET /api/registry/lookup?name=...|did=...` USPTO-TESS-style search
+- `GET /api/registry/:id/bundle` everything-in-one-fetch (DAO doc, agent
+  doc, credentials, status list pointer)
 - `POST /api/file` submit a filing
+- `POST /api/records/:id/update-notice` filer-reported code/state change
 - `GET /api/verify/:id` run verification
+- `GET /credentials/:id/:kind.json` the issued VC for that filing/kind
+- `GET /api/credentials/:id` list all issued credentials for a filing
+- `GET /status/registry.json` signed Bitstring Status List credential
+- `GET /api/status/state` raw status-list metadata (counts, totals)
+- `POST /api/admin/credentials/:id/:kind/revoke` revoke a credential
+- `POST /api/admin/records/:id/dissolve` mark a DAO dissolved
 - `GET /dao/:id/did.json` DID document
 - `GET /agent/:id/did.json` DID document
 - `GET /.well-known/did.json` registry's own DID

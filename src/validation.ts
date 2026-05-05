@@ -124,6 +124,21 @@ export function validateFiling(input: any) {
     else out[field] = r.value;
   }
 
+  // Optional forkOf: if a filing represents a fork from an existing
+  // registered DAO, the filer should reference the parent registryId.
+  // The MVP treats forks as new entities (fork-as-new), with the
+  // forkOf provenance recorded in the DAO document and meta. The
+  // legal question of fork-as-continuation vs. fork-as-new is
+  // deferred to statute / case law.
+  if (input.forkOf !== undefined && input.forkOf !== null && input.forkOf !== '') {
+    const v = String(input.forkOf).trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(v)) {
+      errors.push({ field: 'forkOf', error: 'forkOf must be a registry id (alphanumeric and hyphens, max 64 chars)' });
+    } else {
+      out.forkOf = v.toLowerCase();
+    }
+  }
+
   out.contracts = [];
   for (const [i, c] of (input.contracts || []).entries()) {
     const r = validateContract(c);

@@ -34,8 +34,14 @@ import {
 import { validateFiling, slugify } from './validation.js';
 import { pin } from './ipfs.js';
 import { recordAnchor, anchorEnabled, KIND } from './anchor.js';
-import { loadRecord, saveRecord, reserveRegistryId, releaseRegistryId } from './store.js';
+import { loadRecord, saveRecord, reserveRegistryId, releaseRegistryId, saveCredential } from './store.js';
 import { maxGovernanceBytes } from './config.js';
+import {
+  buildIntakeCredential, buildRegistrationCredential,
+  signCredential, canonicalCredentialHash,
+  CREDENTIAL_KIND,
+} from './vc.js';
+import { allocateIndex } from './statuslist.js';
 
 const CONTROLLER_KID = 'controller-1';
 /**
@@ -46,6 +52,28 @@ const CONTROLLER_KID = 'controller-1';
 const INITIAL_VERSION = 1;
 
 function nowIso() { return new Date().toISOString().replace(/\.\d+Z$/, 'Z'); }
+
+/* ---------- public URL helpers for issued artifacts ---------- */
+
+function publicScheme(host: string) {
+  return host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https';
+}
+
+function registryEntryUrl(host: string, registryId: string) {
+  return `${publicScheme(host)}://${host}/api/records/${registryId}`;
+}
+
+function intakeCredentialUrl(host: string, registryId: string) {
+  return `${publicScheme(host)}://${host}/credentials/${registryId}/intake.json`;
+}
+
+function registrationCredentialUrl(host: string, registryId: string) {
+  return `${publicScheme(host)}://${host}/credentials/${registryId}/registration.json`;
+}
+
+function statusListUrl(host: string) {
+  return `${publicScheme(host)}://${host}/status/registry.json`;
+}
 
 function deriveRegistryId(daoName, salt) {
   const base = slugify(daoName);
@@ -183,6 +211,7 @@ export async function file(input: any, ctx: any) {
     compliance: filing.compliance,
     created,
     version: INITIAL_VERSION,
+    forkOf: filing.forkOf,
   });
 
   let agentDoc = buildAgentDocument({
@@ -215,6 +244,8 @@ export async function file(input: any, ctx: any) {
   //    where status !== 'anchored' and finishes the job.
   const anchors      = { dao: null, agent: null };
   const anchorErrors = { dao: null, agent: null };
+  const credentials: any = { intake: null, registration: null };
+  const credentialErrors: any = { intake: null, registration: null };
   const initialStatus = anchorEnabled() ? 'pending' : 'anchor-disabled';
   const admin = {
     reviewStatus: 'submitted',
@@ -250,6 +281,9 @@ export async function file(input: any, ctx: any) {
     compliance: filing.compliance,
     anchors,
     anchorErrors,
+    credentials,
+    forkOf: filing.forkOf || null,
+    lifecycle: { dissolution: null, updateNotices: [] },
     daoHash:   `sha256:${daoHash}`,
     agentHash: `sha256:${agentHash}`,
     version: INITIAL_VERSION,
@@ -269,6 +303,8 @@ export async function file(input: any, ctx: any) {
     } else {
       out.push({ category: 'anchor', kind: 'config', detail: 'chain anchor disabled (AMOY_RPC_URL/ANCHOR_CONTRACT_ADDRESS/ANCHOR_PRIVATE_KEY not set)' });
     }
+    if (credentialErrors.intake)       out.push({ category: 'credential', kind: 'intake',       detail: credentialErrors.intake.message });
+    if (credentialErrors.registration) out.push({ category: 'credential', kind: 'registration', detail: credentialErrors.registration.message });
     return out;
   }
 
@@ -322,7 +358,47 @@ export async function file(input: any, ctx: any) {
     }
   }
 
-  // 7. Final save with the latest status, anchors, and warnings.
+  // 7. Issue the IntakeAcknowledgement VC. The credential is signed evidence
+  //    that the registry received this filing at `created`; legalStatus is
+  //    explicitly `not-determined`. A self-expiring `validUntil` (defaulting
+  //    to one year) makes downstream verification a push model — third
+  //    parties expect a refreshed credential rather than scraping the
+  //    registry on every check.
+  try {
+    const statusListIndex = allocateIndex();
+    let intakeVc = buildIntakeCredential({
+      issuerDid: controllerDid,
+      daoDid: daoDidStr,
+      agentDid: agentDidStr,
+      registryId,
+      daoName: filing.daoName,
+      governanceContentHash,
+      daoDocumentHash: daoHash,
+      registryEntryUrl: registryEntryUrl(host, registryId),
+      statusListUrl: statusListUrl(host),
+      statusListIndex,
+      validFrom: created,
+      issuedAt: created,
+      filingVersion: INITIAL_VERSION,
+    });
+    intakeVc = signCredential(intakeVc, kp.privateKey, CONTROLLER_KID, created);
+    saveCredential(registryId, 'intake', intakeVc);
+    credentials.intake = {
+      url: intakeCredentialUrl(host, registryId),
+      kind: CREDENTIAL_KIND.INTAKE,
+      contentHash: `sha256:${canonicalCredentialHash(intakeVc)}`,
+      statusListIndex,
+      issuedAt: created,
+      validFrom: intakeVc.validFrom,
+      validUntil: intakeVc.validUntil,
+    };
+  } catch (e: any) {
+    credentialErrors.intake = { message: e.message };
+    // eslint-disable-next-line no-console
+    console.error(`vc (intake): ${e.message}`);
+  }
+
+  // 8. Final save with the latest status, anchors, credentials, and warnings.
   const meta = buildMeta();
   saveRecord(registryId, { dao: daoDoc, agent: agentDoc, meta });
 
@@ -384,6 +460,9 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
   const agentHash = canonicalContentHash(agentDoc);
   const anchors = { dao: null, agent: null };
   const anchorErrors = { dao: null, agent: null };
+  const previousCredentials = previousMeta.credentials || { intake: null, registration: null };
+  const credentials: any = { intake: previousCredentials.intake || null, registration: previousCredentials.registration || null };
+  const credentialErrors: any = { registration: null };
 
   const deriveStatus = () => {
     if (!anchorEnabled()) return 'anchor-disabled';
@@ -394,13 +473,14 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
   };
 
   const buildWarnings = () => {
-    const out = (previousMeta.warnings || []).filter(w => !(w.category === 'anchor'));
+    const out = (previousMeta.warnings || []).filter(w => !(w.category === 'anchor' || (w.category === 'credential' && w.kind === 'registration')));
     if (anchorEnabled()) {
       if (anchorErrors.dao) out.push({ category: 'anchor', kind: 'dao', detail: anchorErrors.dao.message });
       if (anchorErrors.agent) out.push({ category: 'anchor', kind: 'agent', detail: anchorErrors.agent.message });
     } else {
       out.push({ category: 'anchor', kind: 'config', detail: 'chain anchor disabled (AMOY_RPC_URL/ANCHOR_CONTRACT_ADDRESS/ANCHOR_PRIVATE_KEY not set)' });
     }
+    if (credentialErrors.registration) out.push({ category: 'credential', kind: 'registration', detail: credentialErrors.registration.message });
     return out;
   };
 
@@ -414,6 +494,7 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
     agentHash: `sha256:${agentHash}`,
     anchors,
     anchorErrors,
+    credentials,
     status: deriveStatus(),
     warnings: buildWarnings(),
     versions: appendPriorVersion(previousMeta),
@@ -456,6 +537,54 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
         contentHash: `sha256:${agentHash}`,
       });
     }
+  }
+
+  // Issue the RegisteredNHDAOCredential. This is the load-bearing artifact:
+  // a third party (bank, smart contract, agent) can verify "this DAO is
+  // registered under RSA 301-B as of <validFrom> through <validUntil>"
+  // without contacting the SoS over a private channel. The credential
+  // expires (default one year) so verifiers expect a refreshed credential
+  // rather than scraping the registry on every check.
+  try {
+    const statusListIndex = allocateIndex();
+    const daoName = previousMeta.daoName;
+    const daoDidStr = previousMeta.daoDid;
+    const agentDidStr = previousMeta.agentDid;
+    const governanceContentHashHex = String(previousMeta.governance?.contentHash || '').replace(/^sha256:/, '');
+    let registrationVc = buildRegistrationCredential({
+      issuerDid: registryDid(host),
+      daoDid: daoDidStr,
+      agentDid: agentDidStr,
+      registryId,
+      daoName,
+      governanceContentHash: governanceContentHashHex,
+      daoDocumentHash: daoHash,
+      registryEntryUrl: registryEntryUrl(host, registryId),
+      statusListUrl: statusListUrl(host),
+      statusListIndex,
+      validFrom: issuedAt,
+      issuedAt,
+      filingVersion: nextVersion,
+      approval: {
+        approvedBy: decision.reviewer || previousMeta.admin?.reviewedBy || null,
+        reason: decision.reason || previousMeta.admin?.decisionReason || null,
+      },
+    });
+    registrationVc = signCredential(registrationVc, kp.privateKey, CONTROLLER_KID, issuedAt);
+    saveCredential(registryId, 'registration', registrationVc);
+    credentials.registration = {
+      url: registrationCredentialUrl(host, registryId),
+      kind: CREDENTIAL_KIND.REGISTRATION,
+      contentHash: `sha256:${canonicalCredentialHash(registrationVc)}`,
+      statusListIndex,
+      issuedAt,
+      validFrom: registrationVc.validFrom,
+      validUntil: registrationVc.validUntil,
+    };
+  } catch (e: any) {
+    credentialErrors.registration = { message: e.message };
+    // eslint-disable-next-line no-console
+    console.error(`vc (registration): ${e.message}`);
   }
 
   const meta = buildMeta();

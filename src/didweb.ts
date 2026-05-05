@@ -71,6 +71,7 @@ export function buildDaoDocument(opts) {
     compliance,
     created,                // ISO string
     version,                // integer (1 for first)
+    forkOf,                 // optional: parent registryId if this is a fork
   } = opts;
 
   const id = daoDid(host, registryId);
@@ -118,6 +119,16 @@ export function buildDaoDocument(opts) {
     status: 'submitted-intake',
     legalStatus: 'not-determined',
   });
+
+  if (forkOf) {
+    services.push({
+      id: `${id}#fork-of`,
+      type: 'DAOForkProvenance',
+      serviceEndpoint: `https://${host}/dao/${forkOf}/did.json`,
+      forkOf,
+      relationship: 'fork-as-new',
+    });
+  }
 
   return {
     '@context':   [W3C_DID_CONTEXT, JWS_2020_CONTEXT],

@@ -6,8 +6,10 @@
  *   data/records/<registryId>/agent.json   (latest agent DID document)
  *   data/records/<registryId>/meta.json    (filing metadata, anchor info)
  *   data/records/<registryId>/governance.bin (raw bytes pinned to IPFS)
+ *   data/records/<registryId>/credentials/<kind>.json  (issued VCs, by kind)
  *
- * The Express server reads these to serve did:web URLs and the inspector.
+ * The Express server reads these to serve did:web URLs, credentials,
+ * and the inspector.
  *
  * For production the same shape would land in Postgres (and the contract
  * is the source of truth for hash-versus-version correspondence). For the
@@ -109,6 +111,31 @@ export function loadAgent(registryId) {
 export function loadMeta(registryId) {
   if (!exists(registryId)) return null;
   return JSON.parse(fs.readFileSync(path.join(dir(registryId), 'meta.json'), 'utf8'));
+}
+
+/* ---------- credentials ---------- */
+
+function credentialPath(registryId: string, kind: string) {
+  return path.join(dir(registryId), 'credentials', `${kind}.json`);
+}
+
+export function saveCredential(registryId: string, kind: string, credential: any) {
+  if (!exists(registryId)) throw new Error(`store: cannot save credential, record ${registryId} not found`);
+  const target = credentialPath(registryId, kind);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  writeJsonAtomic(target, credential);
+}
+
+export function loadCredential(registryId: string, kind: string) {
+  const target = credentialPath(registryId, kind);
+  if (!fs.existsSync(target)) return null;
+  return JSON.parse(fs.readFileSync(target, 'utf8'));
+}
+
+export function listCredentialKinds(registryId: string): string[] {
+  const credDir = path.join(dir(registryId), 'credentials');
+  if (!fs.existsSync(credDir)) return [];
+  return fs.readdirSync(credDir).filter(f => f.endsWith('.json')).map(f => f.replace(/\.json$/, ''));
 }
 
 export function appendAdminAudit(event) {

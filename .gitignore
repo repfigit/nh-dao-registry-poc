@@ -10,6 +10,8 @@ data/keys/
 data/blobs/
 data/_*tmp*/
 data/deployment-*.json
+data/status-list.json
+data/admin-audit.log
 coverage/
 *.log
 .DS_Store

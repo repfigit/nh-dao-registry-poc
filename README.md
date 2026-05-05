@@ -118,6 +118,17 @@ Open http://localhost:3000 and file a registration. After filing:
 
 - The DAO `did.json` is at http://localhost:3000/dao/<registryId>/did.json
 - The agent `did.json` is at http://localhost:3000/agent/<registryId>/did.json
+- The IntakeAcknowledgement VC is at
+  http://localhost:3000/credentials/<registryId>/intake.json
+- After SoS approval, the RegisteredNHDAOCredential is at
+  http://localhost:3000/credentials/<registryId>/registration.json
+- The Bitstring Status List (revocation) is at
+  http://localhost:3000/status/registry.json
+- The everything-in-one-fetch bundle for third parties is at
+  http://localhost:3000/api/registry/<registryId>/bundle
+- Public lookup-by-name or by-DID:
+  http://localhost:3000/api/registry/lookup?name=&lt;substring&gt;
+  http://localhost:3000/api/registry/lookup?did=&lt;did:web:...&gt;
 - The verification report is at http://localhost:3000/api/verify/<registryId>
 - All records list at http://localhost:3000/inspect
 - Health and readiness probes are at http://localhost:3000/healthz and
@@ -137,6 +148,9 @@ docs/        ARCHITECTURE.md
 ```
 
 See `docs/ARCHITECTURE.md` for the module-by-module walkthrough.
+See `docs/REQUIREMENTS_AND_PRINCIPLES.md` for what the registry IS / IS NOT
+and the principles that resolve design disputes. See
+`docs/STATE_COMPARISON.md` for the side-by-side with WY / TN / UT / VT / AZ.
 
 ## Tests
 

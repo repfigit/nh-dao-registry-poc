@@ -1022,3 +1022,233 @@ describe('rate limiting', () => {
     assert.equal(c.status, 429);
   });
 });
+
+/* ---------- Verifiable Credentials, status list, lookup, lifecycle ---------- */
+
+describe('VC issuance, status list, lookup, lifecycle', () => {
+  let s;
+  let url;
+  let port;
+  const TMP_VC = path.join('data', '_e2e_vc_tmp');
+
+  before(async () => {
+    port = await pickFreePort();
+    process.env.NODE_ENV = 'test';
+    process.env.PORT = String(port);
+    process.env.REGISTRY_HOST = `localhost:${port}`;
+    process.env.REGISTRY_SCHEME = 'http';
+    process.env.CONTROLLER_KEY_PATH = path.join(TMP_VC, 'controller.json');
+    process.env.FILING_RATE_MAX = '1000';
+    process.env.VERIFY_RATE_MAX = '1000';
+    process.env.ADMIN_API_KEY = 'test-admin-token';
+    process.env.AMOY_RPC_URL = '';
+    process.env.ANCHOR_CONTRACT_ADDRESS = '';
+    process.env.ANCHOR_PRIVATE_KEY = '';
+    process.env.ARWEAVE_JWK = '';
+    fs.rmSync(TMP_VC, { recursive: true, force: true });
+    fs.rmSync(path.join('data', 'records'), { recursive: true, force: true });
+    fs.rmSync(path.join('data', 'blobs'), { recursive: true, force: true });
+    fs.rmSync(path.join('data', 'status-list.json'), { force: true });
+    const { app } = await import('../src/server.ts?vc=1');
+    s = http.createServer(app);
+    await new Promise(r => s.listen(port, '127.0.0.1', r));
+    url = `http://127.0.0.1:${port}`;
+  });
+
+  after(async () => {
+    if (s) await new Promise(r => s.close(r));
+    fs.rmSync(TMP_VC, { recursive: true, force: true });
+  });
+
+  function fileBody(daoName, extras = {}) {
+    return {
+      daoName,
+      agentName: 'Jane Smith',
+      agentAddress: '123 Main Street, Concord, NH 03301',
+      agentEmail: 'jane@example.org',
+      ...completeCompliance(),
+      ...extras,
+    };
+  }
+
+  it('issues a signed IntakeAcknowledgement VC at filing time', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Granite Sprint DAO'));
+    assert.equal(filed.status, 200);
+    const id = filed.body.registryId;
+
+    const vcRes = await fetch(`${url}/credentials/${id}/intake.json`);
+    assert.equal(vcRes.status, 200);
+    assert.match(vcRes.headers.get('content-type') || '', /vc\+ld\+json/);
+    const vc = await vcRes.json();
+
+    assert.deepEqual(vc.type, ['VerifiableCredential', 'IntakeAcknowledgement']);
+    assert.equal(vc.credentialSubject.id, filed.body.dao.id);
+    assert.equal(vc.credentialSubject.legalStatus, 'not-determined');
+    assert.equal(vc.credentialSubject.registryLifecycle, 'submitted-intake');
+    assert.equal(vc.credentialStatus.type, 'BitstringStatusListEntry');
+    assert.match(vc.credentialStatus.id, /\/status\/registry\.json#\d+$/);
+    assert.equal(vc.proof.type, 'JsonWebSignature2020');
+    assert.equal(vc.proof.proofPurpose, 'assertionMethod');
+    assert.ok(vc.proof.jws.includes('..'));
+    assert.ok(vc.validFrom && vc.validUntil);
+    assert.ok(Date.parse(vc.validUntil) > Date.parse(vc.validFrom));
+  });
+
+  it('verifies the IntakeAcknowledgement signature against the registry public key', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Verify Sprint DAO'));
+    const id = filed.body.registryId;
+    const vcRes = await fetch(`${url}/credentials/${id}/intake.json`);
+    const vc = await vcRes.json();
+    const wellKnown = await getJson(`${url}/.well-known/did.json`);
+    const jwk = wellKnown.body.verificationMethod[0].publicKeyJwk;
+    const { verifyCredentialSignature } = await import('../src/vc.ts?verify-vc=1');
+    assert.equal(verifyCredentialSignature(vc, jwk), true);
+  });
+
+  it('issues a signed RegisteredNHDAOCredential when the SoS approves', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Approval Sprint DAO'));
+    const id = filed.body.registryId;
+    const reviewed = await postJsonAuthed(`${url}/api/admin/records/${id}/review`, { reviewer: 'Reviewer', note: 'starting' });
+    assert.equal(reviewed.status, 200);
+    const approved = await postJsonAuthed(`${url}/api/admin/records/${id}/approve`, { reviewer: 'Reviewer', reason: 'Evidence complete' });
+    assert.equal(approved.status, 200);
+
+    const regRes = await fetch(`${url}/credentials/${id}/registration.json`);
+    assert.equal(regRes.status, 200);
+    const reg = await regRes.json();
+    assert.deepEqual(reg.type, ['VerifiableCredential', 'RegisteredNHDAOCredential']);
+    assert.equal(reg.credentialSubject.legalStatus, 'registered');
+    assert.equal(reg.credentialSubject.registryLifecycle, 'approved-registration');
+    assert.equal(reg.credentialSubject.approval.approvedBy, 'Reviewer');
+    assert.equal(reg.credentialSubject.approval.reason, 'Evidence complete');
+    assert.ok(reg.proof.jws.includes('..'));
+  });
+
+  it('serves a signed Bitstring Status List credential', async () => {
+    const res = await fetch(`${url}/status/registry.json`);
+    assert.equal(res.status, 200);
+    const list = await res.json();
+    assert.deepEqual(list.type, ['VerifiableCredential', 'StatusList2021Credential']);
+    assert.equal(list.credentialSubject.statusPurpose, 'revocation');
+    assert.ok(typeof list.credentialSubject.encodedList === 'string');
+    assert.ok(list.credentialSubject.totalBits >= 2048);
+    assert.ok(list.proof.jws.includes('..'));
+
+    const { decodeBitstring } = await import('../src/statuslist.ts?decode=1');
+    const bytes = decodeBitstring(list.credentialSubject.encodedList);
+    assert.equal(bytes.length, Math.ceil(list.credentialSubject.totalBits / 8));
+  });
+
+  it('flips the revocation bit when a credential is revoked', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Revocable DAO'));
+    const id = filed.body.registryId;
+    const intakeBefore = await getJson(`${url}/credentials/${id}/intake.json`);
+    const idx = Number(intakeBefore.body.credentialStatus.statusListIndex);
+    assert.ok(Number.isInteger(idx) && idx >= 0);
+
+    const before = await getJson(`${url}/status/registry.json`);
+    const { decodeBitstring, bitAt } = await import('../src/statuslist.ts?bit=1');
+    let bytes = decodeBitstring(before.body.credentialSubject.encodedList);
+    assert.equal(bitAt(bytes, idx), false);
+
+    const revoke = await postJsonAuthed(`${url}/api/admin/credentials/${id}/intake/revoke`, { reviewer: 'Reviewer', reason: 'fraudulent filing' });
+    assert.equal(revoke.status, 200);
+    assert.equal(revoke.body.revoked, true);
+
+    const after = await getJson(`${url}/status/registry.json`);
+    bytes = decodeBitstring(after.body.credentialSubject.encodedList);
+    assert.equal(bitAt(bytes, idx), true);
+  });
+
+  it('looks up registered DAOs by name and by DID without auth', async () => {
+    await postJson(`${url}/api/file`, fileBody('Searchable Granite DAO'));
+    const byName = await getJson(`${url}/api/registry/lookup?name=searchable`);
+    assert.equal(byName.status, 200);
+    assert.ok(byName.body.records.some(r => r.daoName === 'Searchable Granite DAO'));
+
+    const someDid = byName.body.records[0].daoDid;
+    const byDid = await getJson(`${url}/api/registry/lookup?did=${encodeURIComponent(someDid)}`);
+    assert.equal(byDid.status, 200);
+    assert.equal(byDid.body.count, 1);
+    assert.equal(byDid.body.records[0].daoDid, someDid);
+
+    const empty = await getJson(`${url}/api/registry/lookup`);
+    assert.equal(empty.status, 400);
+  });
+
+  it('returns DAO doc, agent doc, and credentials in a single bundle fetch', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Bundle Granite DAO'));
+    const id = filed.body.registryId;
+    const bundle = await getJson(`${url}/api/registry/${id}/bundle`);
+    assert.equal(bundle.status, 200);
+    assert.equal(bundle.body.public.registryId, id);
+    assert.equal(bundle.body.daoDocument.id, filed.body.dao.id);
+    assert.equal(bundle.body.agentDocument.id, filed.body.agent.id);
+    assert.ok(bundle.body.credentials.intake);
+    assert.equal(bundle.body.credentials.intake.type[1], 'IntakeAcknowledgement');
+    assert.equal(bundle.body.statusListUrl, '/status/registry.json');
+  });
+
+  it('records a fork via forkOf and lists forks of the parent', async () => {
+    const parent = await postJson(`${url}/api/file`, fileBody('Parent Lineage DAO'));
+    assert.equal(parent.status, 200);
+    const parentId = parent.body.registryId;
+
+    const fork = await postJson(`${url}/api/file`, fileBody('Lineage Fork DAO', { forkOf: parentId }));
+    assert.equal(fork.status, 200);
+    const forkSvc = fork.body.dao.service.find(s => s.type === 'DAOForkProvenance');
+    assert.ok(forkSvc, 'DAOForkProvenance service expected on fork document');
+    assert.equal(forkSvc.forkOf, parentId);
+    assert.equal(forkSvc.relationship, 'fork-as-new');
+
+    const forks = await getJson(`${url}/api/records/${parentId}/forks`);
+    assert.equal(forks.status, 200);
+    assert.equal(forks.body.parent, parentId);
+    assert.ok(forks.body.forks.some(f => f.daoName === 'Lineage Fork DAO'));
+
+    const badFork = await postJson(`${url}/api/file`, fileBody('Bad Fork DAO', { forkOf: 'not a slug!!' }));
+    assert.equal(badFork.status, 400);
+    assert.ok(badFork.body.details.some(d => d.field === 'forkOf'));
+  });
+
+  it('records dissolution and revokes the registration credential', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Dissolve Sprint DAO'));
+    const id = filed.body.registryId;
+    await postJsonAuthed(`${url}/api/admin/records/${id}/review`, { reviewer: 'Reviewer' });
+    await postJsonAuthed(`${url}/api/admin/records/${id}/approve`, { reviewer: 'Reviewer', reason: 'OK' });
+
+    const reg = await getJson(`${url}/credentials/${id}/registration.json`);
+    const regIdx = Number(reg.body.credentialStatus.statusListIndex);
+    const before = await getJson(`${url}/status/registry.json`);
+    const { decodeBitstring, bitAt } = await import('../src/statuslist.ts?dissolve=1');
+    assert.equal(bitAt(decodeBitstring(before.body.credentialSubject.encodedList), regIdx), false);
+
+    const dissolve = await postJsonAuthed(`${url}/api/admin/records/${id}/dissolve`, { reviewer: 'Reviewer', reason: 'voluntary wind-down' });
+    assert.equal(dissolve.status, 200);
+    assert.ok(dissolve.body.lifecycle.dissolution);
+    assert.equal(dissolve.body.lifecycle.dissolution.reason, 'voluntary wind-down');
+    assert.equal(dissolve.body.credentialRevocation.changed, true);
+
+    const after = await getJson(`${url}/status/registry.json`);
+    assert.equal(bitAt(decodeBitstring(after.body.credentialSubject.encodedList), regIdx), true);
+
+    const dissolveNoReason = await postJsonAuthed(`${url}/api/admin/records/${id}/dissolve`, { reviewer: 'Reviewer' });
+    assert.equal(dissolveNoReason.status, 400);
+  });
+
+  it('records filer-reported update notices', async () => {
+    const filed = await postJson(`${url}/api/file`, fileBody('Update Notice DAO'));
+    const id = filed.body.registryId;
+    const notice = await postJson(`${url}/api/records/${id}/update-notice`, {
+      summary: 'Upgraded staking contract to v2',
+      contractAddress: '0x' + '55'.repeat(20),
+      newCodeHash: 'sha256:0123abcd',
+    });
+    assert.equal(notice.status, 200);
+    assert.equal(notice.body.lifecycle.updateNotices.length, 1);
+    assert.equal(notice.body.lifecycle.updateNotices[0].summary, 'Upgraded staking contract to v2');
+
+    const noSummary = await postJson(`${url}/api/records/${id}/update-notice`, {});
+    assert.equal(noSummary.status, 400);
+  });
+});
