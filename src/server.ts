@@ -1,5 +1,5 @@
 /**
- * NH DAO Registry MVP server.
+ * NH DAO Registry POC server.
  *
  * Routes:
  *
@@ -678,7 +678,7 @@ if (!IS_TEST) {
   }
   app.listen(PORT, () => {
     // eslint-disable-next-line no-console
-    console.log(`NH DAO Registry MVP listening on ${SCHEME}://${HOST} (port ${PORT})`);
+    console.log(`NH DAO Registry POC listening on ${SCHEME}://${HOST} (port ${PORT})`);
     // eslint-disable-next-line no-console
     console.log(`Registry DID: ${registryDid(HOST)}`);
     // eslint-disable-next-line no-console

@@ -99,7 +99,7 @@ verifier shows whether the pieces still agree.
 
 ```bash
 git clone <this-repo>
-cd nh-dao-registry-mvp
+cd nh-dao-registry-poc
 npm install
 cp .env.example .env
 

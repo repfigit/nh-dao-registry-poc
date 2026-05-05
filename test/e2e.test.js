@@ -152,7 +152,7 @@ function completeCompliance(overrides = {}) {
   };
 }
 
-describe('NH DAO Registry MVP, end-to-end', () => {
+describe('NH DAO Registry POC, end-to-end', () => {
   before(async () => { await startServer(); });
   after(async () => { await stopServer(); });
 

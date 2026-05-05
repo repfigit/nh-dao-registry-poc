@@ -7,7 +7,7 @@ This document is intentionally not the MVP deployment guide. For the near-term d
 
 ## Purpose
 
-Define the major changes required to move the NH DAO Registry MVP from a single-instance reference deployment to a government-grade, auditable, highly available service.
+Define the major changes required to move the NH DAO Registry POC from a single-instance reference deployment to a government-grade, auditable, highly available service.
 
 Target posture:
 

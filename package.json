@@ -1,5 +1,5 @@
 {
-  "name": "nh-dao-registry-mvp",
+  "name": "nh-dao-registry-poc",
   "version": "0.6.0",
   "description": "Reference implementation of the NH DAO Registry POC (v0.6): two-DID model with did:web identifiers, mandatory IPFS pinning, Polygon Amoy chain anchor.",
   "type": "module",
