@@ -1,4 +1,4 @@
-app = "nh-dao-registry-mvp"
+app = "nh-dao-registry-poc"
 primary_region = "iad"
 
 [build]
@@ -8,7 +8,7 @@ primary_region = "iad"
   NODE_ENV = "production"
   PORT = "3000"
   REGISTRY_SCHEME = "https"
-  REGISTRY_HOST = "nh-dao-registry-mvp.fly.dev"
+  REGISTRY_HOST = "nh-dao-registry-poc.fly.dev"
   REQUEST_BODY_LIMIT = "5mb"
   MAX_GOVERNANCE_BYTES = "5242880"
   ANCHOR_MAX_RETRIES = "3"
