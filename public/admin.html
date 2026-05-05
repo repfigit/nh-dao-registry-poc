@@ -184,7 +184,7 @@
             </label>
             <label class="flex items-start gap-2">
               <input id="checkEvidence" type="checkbox" class="mt-0.5">
-              <span>Evidence URLs, governance CID, and required attestations have been reviewed.</span>
+              <span>Uploaded governance/bylaws bytes, hash, CID, evidence URLs, and required attestations have been reviewed.</span>
             </label>
             <label class="flex items-start gap-2">
               <input id="checkAgent" type="checkbox" class="mt-0.5">
@@ -338,6 +338,32 @@ function evidenceRow(label, value) {
   return wrap;
 }
 
+function evidenceLinkRow(label, href, text) {
+  const wrap = evidenceRow(label, '');
+  const dd = wrap.querySelector('dd');
+  dd.textContent = '';
+  if (!href) {
+    dd.textContent = 'not supplied';
+    return wrap;
+  }
+  const a = document.createElement('a');
+  a.className = 'font-bold text-[#083b73] underline underline-offset-2';
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noreferrer';
+  a.textContent = text || href;
+  dd.appendChild(a);
+  return wrap;
+}
+
+function formatBytes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 function renderAudit(events) {
   const list = $('audit');
   list.replaceChildren();
@@ -386,6 +412,9 @@ async function loadDetail(registryId) {
 
   const evidence = $('evidence');
   evidence.replaceChildren();
+  const governanceCid = meta.governance?.cid;
+  const governancePath = governanceCid ? `/ipfs/${encodeURIComponent(governanceCid)}` : '';
+  const arweaveUrl = meta.governance?.arweave?.gatewayUrl || meta.governance?.arweave?.uri || '';
   evidence.append(
     evidenceRow('Registered domain', meta.compliance?.registeredDomain),
     evidenceRow('DAO public address', meta.compliance?.publicAddress),
@@ -394,7 +423,14 @@ async function loadDetail(registryId) {
     evidenceRow('Internal disputes', meta.compliance?.evidence?.internalDisputeResolutionUrl),
     evidenceRow('Third-party disputes', meta.compliance?.evidence?.thirdPartyDisputeResolutionUrl),
     evidenceRow('Legal representative authority', meta.compliance?.evidence?.legalRepresentativeAuthorizationUrl),
-    evidenceRow('Governance CID', meta.governance?.cid)
+    evidenceRow('Governance file', meta.governance?.filename),
+    evidenceRow('Governance source', meta.governance?.source),
+    evidenceRow('Governance size', formatBytes(meta.governance?.byteLength)),
+    evidenceRow('Governance content hash', meta.governance?.contentHash),
+    evidenceRow('Governance CID', governanceCid),
+    evidenceLinkRow('Stored governance file', governancePath, 'Open stored bytes'),
+    evidenceLinkRow('Arweave mirror', arweaveUrl, arweaveUrl ? 'Open Arweave copy' : ''),
+    evidenceRow('Approval evidence hash', meta.approvalEvidence?.snapshotHash)
   );
 
   renderAudit(audit);

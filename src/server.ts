@@ -33,6 +33,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { canonicalize } from './canonicalize.js';
 import { file as runFiling, issueApprovedRegistration } from './publication.js';
 import { verifyDao } from './verifier.js';
 import { operationalBalances } from './balances.js';
@@ -41,7 +42,7 @@ import {
   saveMeta, appendAdminAudit, listAdminAudit,
   loadCredential, listCredentialKinds,
 } from './store.js';
-import { loadOrCreateKeyPair } from './crypto.js';
+import { loadOrCreateKeyPair, sha256Hex } from './crypto.js';
 import { publicKeyJwk } from './crypto.js';
 import { anchorEnabled } from './anchor.js';
 import { readLocal } from './ipfs.js';
@@ -204,6 +205,9 @@ function publicRecord(record: any) {
       gatewayUrl: meta.governance?.gatewayUrl || null,
       contentHash: meta.governance?.contentHash || null,
       arweave: meta.governance?.arweave || null,
+      filename: meta.governance?.filename || null,
+      byteLength: meta.governance?.byteLength || null,
+      source: meta.governance?.source || null,
     },
     contracts: meta.contracts || [],
     compliance: meta.compliance ? {
@@ -219,6 +223,14 @@ function publicRecord(record: any) {
     } : null,
     anchors: meta.anchors || null,
     credentials: meta.credentials || null,
+    lifecycle: meta.lifecycle || { dissolution: null, updateNotices: [], corrections: [], amendments: [] },
+    approvalEvidence: meta.approvalEvidence ? {
+      snapshotHash: meta.approvalEvidence.snapshotHash,
+      governance: meta.approvalEvidence.governance,
+      compliance: {
+        evidenceHash: meta.approvalEvidence.compliance?.evidenceHash || null,
+      },
+    } : null,
     warnings: meta.warnings || [],
     links: {
       daoDidDocument: `/dao/${meta.registryId}/did.json`,
@@ -441,6 +453,80 @@ app.post('/api/records/:id/update-notice', filingLimiter, requireFilingAuth, (re
   ];
   saveMeta(req.params.id, meta);
   res.json({ registryId: req.params.id, lifecycle: meta.lifecycle });
+});
+
+/**
+ * Submit a correction or amendment packet. Corrections are used when an
+ * SoS reviewer has placed a filing in `needs_correction`; amendments are
+ * post-approval filer notices that something material changed. This endpoint
+ * records the packet and its canonical hash, but it does not silently rewrite
+ * signed DID documents or issued credentials. A reviewer still approves the
+ * updated evidence before the public registration status changes.
+ */
+app.post('/api/records/:id/correction', filingLimiter, requireFilingAuth, (req, res) => {
+  const meta = loadMeta(req.params.id);
+  if (!meta) return res.status(404).json({ error: 'not found' });
+
+  const body = req.body || {};
+  const summary = String(body.summary || '').trim().slice(0, 2000);
+  if (!summary) return res.status(400).json({ error: 'summary is required' });
+
+  const admin = ensureAdmin(meta);
+  const type = admin.reviewStatus === 'needs_correction' ? 'correction' : 'amendment';
+  const at = nowIsoNoMs();
+  const fields = body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields) ? body.fields : {};
+  const evidence = {
+    evidenceUrl: String(body.evidenceUrl || '').trim().slice(0, 1000) || null,
+    governanceCid: String(body.governanceCid || '').trim().slice(0, 200) || null,
+    governanceContentHash: String(body.governanceContentHash || '').trim().slice(0, 200) || null,
+  };
+  const packet = {
+    schema: 'nh-dao-registry:filing-correction:v1',
+    type,
+    registryId: req.params.id,
+    submittedAt: at,
+    summary,
+    fields,
+    evidence,
+    priorReviewStatus: admin.reviewStatus,
+    priorVersion: meta.version || null,
+  };
+  const entry = {
+    ...packet,
+    packetHash: `sha256:${sha256Hex(canonicalize(packet))}`,
+  };
+
+  meta.lifecycle = {
+    dissolution: null,
+    updateNotices: [],
+    corrections: [],
+    amendments: [],
+    ...(meta.lifecycle || {}),
+  };
+  if (type === 'correction') {
+    meta.lifecycle.corrections = [...(meta.lifecycle.corrections || []), entry];
+    meta.admin = {
+      ...admin,
+      reviewStatus: 'submitted',
+      reviewedAt: at,
+      decisionReason: 'Correction submitted for review',
+    };
+  } else {
+    meta.lifecycle.amendments = [...(meta.lifecycle.amendments || []), entry];
+  }
+
+  saveMeta(req.params.id, meta);
+  appendAdminAudit({
+    at,
+    registryId: req.params.id,
+    action: `submit-${type}`,
+    fromStatus: admin.reviewStatus,
+    toStatus: type === 'correction' ? 'submitted' : admin.reviewStatus,
+    reviewer: 'Filer',
+    reason: summary,
+    packetHash: entry.packetHash,
+  });
+  res.json({ registryId: req.params.id, type, packetHash: entry.packetHash, lifecycle: meta.lifecycle, reviewStatus: ensureAdmin(meta).reviewStatus });
 });
 
 /**

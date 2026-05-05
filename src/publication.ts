@@ -100,6 +100,59 @@ function updateRegistryRecordService(document: any, status: string, legalStatus:
   };
 }
 
+function approvalEvidenceReference(meta: any) {
+  const complianceEvidence = meta.compliance?.evidence || null;
+  const complianceEvidenceHash = complianceEvidence
+    ? `sha256:${sha256Hex(canonicalize(complianceEvidence))}`
+    : null;
+  return {
+    schema: 'nh-dao-registry:approval-evidence:v1',
+    registryId: meta.registryId,
+    filingVersion: meta.version || INITIAL_VERSION,
+    submittedAt: meta.filed || null,
+    governance: {
+      cid: meta.governance?.cid || null,
+      ipfsUri: meta.governance?.ipfsUri || null,
+      gatewayUrl: meta.governance?.gatewayUrl || null,
+      contentHash: meta.governance?.contentHash || null,
+      filename: meta.governance?.filename || null,
+      byteLength: meta.governance?.byteLength || null,
+      source: meta.governance?.source || null,
+      arweave: meta.governance?.arweave || null,
+    },
+    compliance: {
+      status: meta.compliance?.status || null,
+      legalStatus: meta.compliance?.legalStatus || null,
+      statute: meta.compliance?.statute || null,
+      registeredDomain: meta.compliance?.registeredDomain || null,
+      publicAddress: meta.compliance?.publicAddress || null,
+      lifecycleStatus: meta.compliance?.lifecycleStatus || null,
+      evidence: complianceEvidence,
+      evidenceHash: complianceEvidenceHash,
+      assurance: meta.compliance?.assurance || null,
+      attestations: meta.compliance?.attestations || null,
+    },
+    documents: {
+      daoDid: meta.daoDid || null,
+      agentDid: meta.agentDid || null,
+      submittedDaoHash: meta.daoHash || null,
+      submittedAgentHash: meta.agentHash || null,
+    },
+    contracts: meta.contracts || [],
+    credentials: {
+      intake: meta.credentials?.intake || null,
+    },
+  };
+}
+
+function approvalEvidenceSnapshot(meta: any) {
+  const reference = approvalEvidenceReference(meta);
+  return {
+    ...reference,
+    snapshotHash: `sha256:${sha256Hex(canonicalize(reference))}`,
+  };
+}
+
 function appendPriorVersion(meta: any) {
   const prior = {
     version: meta.version || INITIAL_VERSION,
@@ -424,6 +477,16 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
   const issuedAt = nowIso();
   const previousMeta = record.meta || {};
   const nextVersion = Number(previousMeta.version || INITIAL_VERSION) + 1;
+  const approvalEvidence = approvalEvidenceSnapshot(previousMeta);
+  const approval = {
+    approvedAt: issuedAt,
+    approvedBy: decision.reviewer || previousMeta.admin?.reviewedBy || null,
+    reason: decision.reason || previousMeta.admin?.decisionReason || null,
+    evidenceSnapshotHash: approvalEvidence.snapshotHash,
+    governanceContentHash: approvalEvidence.governance.contentHash,
+    governanceCid: approvalEvidence.governance.cid,
+    complianceEvidenceHash: approvalEvidence.compliance.evidenceHash,
+  };
 
   let daoDoc = updateRegistryRecordService(stripMutableEvidence(record.dao), 'approved-registration', 'registered');
   daoDoc = {
@@ -432,11 +495,7 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
     version: nextVersion,
     updated: issuedAt,
     registryStatus: 'approved',
-    approval: {
-      approvedAt: issuedAt,
-      approvedBy: decision.reviewer || previousMeta.admin?.reviewedBy || null,
-      reason: decision.reason || previousMeta.admin?.decisionReason || null,
-    },
+    approval,
   };
 
   let agentDoc = updateRegistryRecordService(stripMutableEvidence(record.agent), 'approved-registration', 'registered');
@@ -446,11 +505,7 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
     version: nextVersion,
     updated: issuedAt,
     registryStatus: 'approved',
-    approval: {
-      approvedAt: issuedAt,
-      approvedBy: decision.reviewer || previousMeta.admin?.reviewedBy || null,
-      reason: decision.reason || previousMeta.admin?.decisionReason || null,
-    },
+    approval,
   };
 
   daoDoc = signDocument(daoDoc, kp.privateKey, CONTROLLER_KID, issuedAt);
@@ -495,6 +550,7 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
     anchors,
     anchorErrors,
     credentials,
+    approvalEvidence,
     status: deriveStatus(),
     warnings: buildWarnings(),
     versions: appendPriorVersion(previousMeta),
@@ -566,8 +622,12 @@ export async function issueApprovedRegistration(registryId: string, ctx: any, de
       issuedAt,
       filingVersion: nextVersion,
       approval: {
-        approvedBy: decision.reviewer || previousMeta.admin?.reviewedBy || null,
-        reason: decision.reason || previousMeta.admin?.decisionReason || null,
+        approvedBy: approval.approvedBy,
+        reason: approval.reason,
+        evidenceSnapshotHash: approvalEvidence.snapshotHash,
+        governanceContentHash: approvalEvidence.governance.contentHash,
+        governanceCid: approvalEvidence.governance.cid,
+        complianceEvidenceHash: approvalEvidence.compliance.evidenceHash,
       },
     });
     registrationVc = signCredential(registrationVc, kp.privateKey, CONTROLLER_KID, issuedAt);

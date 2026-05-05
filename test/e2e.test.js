@@ -47,11 +47,13 @@ before(async () => {
   // so the rate limiter is not exercised here. (It has its own test below.)
   process.env.FILING_RATE_MAX = '1000';
   process.env.VERIFY_RATE_MAX = '1000';
+  process.env.FILING_API_KEY = '';
   process.env.ADMIN_API_KEY = 'test-admin-token';
   process.env.AMOY_RPC_URL = '';
   process.env.RPC_URL = '';
   process.env.ANCHOR_CONTRACT_ADDRESS = '';
   process.env.ANCHOR_PRIVATE_KEY = '';
+  process.env.ARWEAVE_JWT = '';
   process.env.ARWEAVE_JWK = '';
 
   // Clear any prior test artifacts.
@@ -439,8 +441,14 @@ describe('NH DAO Registry POC, end-to-end', () => {
     assert.equal(approve.body.meta.version, 2);
     assert.equal(approve.body.meta.approvedVersion, 2);
     assert.equal(approve.body.meta.registryLifecycle, 'approved-registration');
+    assert.match(approve.body.meta.approvalEvidence.snapshotHash, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(approve.body.meta.approvalEvidence.governance.cid, approve.body.meta.governance.cid);
+    assert.equal(approve.body.meta.approvalEvidence.governance.contentHash, approve.body.meta.governance.contentHash);
+    assert.match(approve.body.meta.approvalEvidence.compliance.evidenceHash, /^sha256:[a-f0-9]{64}$/);
     assert.equal(approve.body.dao.version, 2);
     assert.equal(approve.body.dao.registryStatus, 'approved');
+    assert.equal(approve.body.dao.approval.evidenceSnapshotHash, approve.body.meta.approvalEvidence.snapshotHash);
+    assert.equal(approve.body.dao.approval.governanceCid, approve.body.meta.governance.cid);
     assert.ok(approve.body.meta.versions.some(v => v.version === 1));
     const recordSvc = approve.body.dao.service.find(s => s.type === 'NHDAORegistryRecord');
     assert.equal(recordSvc.status, 'approved-registration');
@@ -466,6 +474,42 @@ describe('NH DAO Registry POC, end-to-end', () => {
     });
     assert.equal(denyMissingReason.status, 400);
     assert.match(denyMissingReason.body.error, /reason is required/);
+  });
+
+  it('records filer correction packets and requeues needs-correction filings', async () => {
+    const filed = await postJson(`${baseUrl}/api/file`, {
+      daoName: 'Correction Packet DAO',
+      agentName: 'Jane Smith',
+      agentAddress: '1 Main St, Concord, NH 03301',
+      agentEmail: 'jane@example.org',
+      ...completeCompliance(),
+    });
+    assert.equal(filed.status, 200);
+    const id = filed.body.registryId;
+
+    const requested = await postJsonAuthed(`${baseUrl}/api/admin/records/${id}/request-correction`, {
+      reviewer: 'Test Reviewer',
+      reason: 'Bylaws exhibit needs clearer authority language',
+    });
+    assert.equal(requested.status, 200);
+    assert.equal(requested.body.meta.admin.reviewStatus, 'needs_correction');
+
+    const correction = await postJson(`${baseUrl}/api/records/${id}/correction`, {
+      summary: 'Uploaded corrected bylaws exhibit and clarified signer authority.',
+      fields: { legalRepresentativeAuthorizationUrl: 'updated' },
+      governanceCid: filed.body.meta.governance.cid,
+      governanceContentHash: filed.body.meta.governance.contentHash,
+    });
+    assert.equal(correction.status, 200);
+    assert.equal(correction.body.type, 'correction');
+    assert.match(correction.body.packetHash, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(correction.body.reviewStatus, 'submitted');
+    assert.equal(correction.body.lifecycle.corrections.length, 1);
+    assert.equal(correction.body.lifecycle.corrections[0].packetHash, correction.body.packetHash);
+
+    const full = await getJsonAuthed(`${baseUrl}/api/admin/records/${id}`);
+    assert.equal(full.body.meta.admin.reviewStatus, 'submitted');
+    assert.ok(full.body.audit.some(ev => ev.action === 'submit-correction' && ev.packetHash === correction.body.packetHash));
   });
 
   it('exposes health and readiness endpoints', async () => {
@@ -1121,6 +1165,9 @@ describe('VC issuance, status list, lookup, lifecycle', () => {
     assert.equal(reg.credentialSubject.registryLifecycle, 'approved-registration');
     assert.equal(reg.credentialSubject.approval.approvedBy, 'Reviewer');
     assert.equal(reg.credentialSubject.approval.reason, 'Evidence complete');
+    assert.match(reg.credentialSubject.approval.evidenceSnapshotHash, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(reg.credentialSubject.approval.governanceCid, approved.body.meta.governance.cid);
+    assert.equal(reg.credentialSubject.approval.governanceContentHash, approved.body.meta.governance.contentHash);
     assert.ok(reg.proof.jws.includes('..'));
   });
 

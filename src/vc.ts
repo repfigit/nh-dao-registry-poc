@@ -121,7 +121,16 @@ export function buildIntakeCredential(opts: BuildCredentialOpts) {
  * reviewer approved the filing and the DAO is registered under RSA
  * 301-B for the validity window.
  */
-export function buildRegistrationCredential(opts: BuildCredentialOpts & { approval?: { approvedBy?: string | null; reason?: string | null } }) {
+export function buildRegistrationCredential(opts: BuildCredentialOpts & {
+  approval?: {
+    approvedBy?: string | null;
+    reason?: string | null;
+    evidenceSnapshotHash?: string | null;
+    governanceContentHash?: string | null;
+    governanceCid?: string | null;
+    complianceEvidenceHash?: string | null;
+  };
+}) {
   const vc = baseCredential(CREDENTIAL_KIND.REGISTRATION, opts);
   vc.credentialSubject = {
     ...vc.credentialSubject,
